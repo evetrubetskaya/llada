@@ -8,7 +8,13 @@ Going to train on **FineWeb** dataset:
 * 300M parameter model
 * 1.5B parameter model
 
-Working on final implementation, things to be done:
+Already implemented:
+* Diffusion Transformer (DiT)
+* Categorical Flow Matching
+* Loss computation
+* Sampling
+
+Things to be done:
 * Multi-GPU training
 * Block diffusion
 * KV-cache
