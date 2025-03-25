@@ -9,15 +9,17 @@ Going to train on **FineWeb** dataset:
 * 1.5B parameter model
 
 Already implemented:
-* Diffusion Transformer (DiT)
-* Categorical Flow Matching
-* Loss computation
-* Sampling
+- [x] Diffusion Transformer (DiT)
+- [x] Categorical Flow Matching
+- [x] Loss computation
+- [x] Sampling
+- [x] BPE tokenizer
 
 Things to be done:
-* Multi-GPU training
-* Block diffusion
-* KV-cache
+- [] Data loading
+- [] Multi-GPU training
+- [] Block diffusion
+- [] KV-cache
 
 ___
 
