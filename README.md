@@ -16,10 +16,10 @@ Already implemented:
 - [x] BPE tokenizer
 
 Things to be done:
-- [] Data loading
-- [] Multi-GPU training
-- [] Block diffusion
-- [] KV-cache
+- [ ] Data loading
+- [ ] Multi-GPU training
+- [ ] Block diffusion
+- [ ] KV-cache
 
 ___
 
