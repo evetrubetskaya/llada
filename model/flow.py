@@ -7,6 +7,12 @@ import torch
 from model.utils import get_mask_from_lengths
 
 
+SOLVERS = [
+    'euler',
+    'ddim'
+]
+
+
 class CategoricalFlowMatching(torch.nn.Module):
     def __init__(self, model: torch.nn.Module, vocab_size: int):
         super().__init__()
@@ -60,6 +66,7 @@ class CategoricalFlowMatching(torch.nn.Module):
         self,
         lengths: torch.LongTensor['B'],
         timesteps: int = 10,
+        solver: str = 'euler',
         verbose: bool = True
     ) -> tuple[
         list[torch.LongTensor['Ti']],
@@ -90,12 +97,18 @@ class CategoricalFlowMatching(torch.nn.Module):
             t = t.repeat(B)  # [B]
             x_t = torch.distributions.Categorical(p_t).sample()  # [B, T]
             states.append(x_t.clone())
-            # we apply DDIM step to get from x_t to x_{t+h} state
+            # at each step we estimate how p_1 looks like
             logits = self.model(x_t, t, mask)  # [B, T, vocab_size]
             p_1 = logits.softmax(-1)  # [B, T, vocab_size]
             if i < grid.shape[0] - 1:
                 t_bc = t[:, None, None]  # [B, 1, 1]
-                p_t = (t_bc + h) * p_1 + (1 - (t_bc + h)) * p_0  # [B, T, vocab_size]
+                # now we obtain next distribution by doing a solver step
+                match solver:
+                    case 'euler':
+                        u_t = (p_1 - p_t) / (1.0 - t_bc)  # [B, T, vocab_size]
+                        p_t = p_t + h * u_t  # [B, T, vocab_size]
+                    case 'ddim':
+                        p_t = (t_bc + h) * p_1 + (1 - (t_bc + h)) * p_0  # [B, T, vocab_size]
         
         # sampling final sequence
         x_1 = torch.distributions.Categorical(p_1).sample()  # [B, T]

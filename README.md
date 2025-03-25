@@ -12,7 +12,7 @@ Already implemented:
 - [x] Diffusion Transformer (DiT)
 - [x] Categorical Flow Matching
 - [x] Loss computation
-- [x] Sampling
+- [x] Euler/DDIM solvers
 - [x] BPE tokenizer
 
 Things to be done:
@@ -40,7 +40,7 @@ Categorical Flow Matching:
 * The model learns to predict the original text distribution from intermediate perturbated states sampled from linearly interpolated (via optimal transport paths) categorical distrubutions
 * Training is done by minimizing cross-entropy between predicted distributions and ground truth sequences at random diffusion timestep
 * During sampling, progressively transitions to a learned distribution over tokens
-* At each sampling timestep, sequences are obtained using DDIM solver
+* At each sampling timestep, sequences are obtained using Euler/DDIM solver
 
 Transformer Architecture (DiT):
 * Embedding layers for tokens and timesteps
