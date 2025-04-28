@@ -14,10 +14,10 @@ Already implemented:
 - [x] Loss computation
 - [x] Euler/DDIM solvers
 - [x] BPE tokenizer
+- [x] Data loading
+- [x] Multi-GPU training
 
 Things to be done:
-- [ ] Data loading
-- [ ] Multi-GPU training
 - [ ] Block diffusion
 - [ ] KV-cache
 
