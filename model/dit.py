@@ -24,6 +24,40 @@ class FFN(torch.nn.Module):
         return x
 
 
+def rotate_half(x: torch.FloatTensor['B n_heads T dim_head']) -> torch.FloatTensor['B n_heads T dim_head']:
+    x = x.clone()  # [B, n_heads, T, dim_head]
+    x1, x2 = x.chunk(2, -1)  # [B, n_heads, T, dim_head//2]
+    out = torch.cat([-x2.clone(), x1.clone()], dim=-1)  # [B, n_heads, T, dim_head]
+    return out  # [B, n_heads, T, dim_head]
+
+
+class RotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim_head: int, base: int = 10000):
+        super().__init__()
+        self.dim_head = dim_head
+        self.base = base
+
+    def forward(
+        self,
+        x: torch.FloatTensor['B n_heads T dim_head'],
+        pos: torch.LongTensor['B T']
+    ) -> torch.FloatTensor['B n_heads T dim_head']:
+        dtype = x.dtype
+        device = x.device
+        x = x.float()  # [B, n_heads, T, dim_head]
+        with torch.amp.autocast(device.type, enabled=False):
+            dims_half = torch.arange(0, self.dim_head, 2, dtype=torch.float32, device=device)  # [dim_head//2]
+            inv_freq = 1.0 / (self.base ** (dims_half / self.dim_head))  # [dim_head//2]
+            freqs = torch.einsum("bi,j->bij", pos, inv_freq)  # [B, T, dim_head//2]
+            embds = torch.cat([freqs, freqs], dim=-1)  # [B, T, dim_head]
+            cos = embds.cos().unsqueeze(1)  # [B, 1, T, dim_head]
+            sin = embds.sin().unsqueeze(1)  # [B, 1, T, dim_head]
+            x_rotated = rotate_half(x)  # [B, n_heads, T, dim_head]
+            x_embd = (x * cos) + (x_rotated * sin)  # [B, n_heads, T, dim_head]
+        x_embd = x_embd.to(dtype)  # [B, n_heads, T, dim_head]
+        return x_embd  # [B, n_heads, T, dim_head]
+
+
 class MHSA(torch.nn.Module):
     def __init__(self, dim: int, n_heads: int):
         super().__init__()
@@ -36,12 +70,18 @@ class MHSA(torch.nn.Module):
         self.norm_q = torch.nn.LayerNorm(self.dim_head)
         self.norm_k = torch.nn.LayerNorm(self.dim_head)
         self.W_o = torch.nn.Linear(dim, dim, bias=False)
+        self.rope = RotaryEmbedding(self.dim_head)
 
-    def forward(self, x: torch.FloatTensor['B T D'], mask: torch.BoolTensor['B T 1']) -> torch.FloatTensor['B T D']:
+    def forward(
+        self,
+        x: torch.FloatTensor['B T D'],
+        attn_mask: torch.BoolTensor['B 1 T T'],
+        pos: torch.LongTensor['B T']
+    ) -> torch.FloatTensor['B T D']:
         B, T, D = x.shape
         
         # compute Q, K, V projections
-        QKV = self.W_qkv(x) * mask  # [B, T, 3D]
+        QKV = self.W_qkv(x)  # [B, T, 3D]
         Q, K, V = QKV.chunk(3, -1)  # 3 x [B, T, D]
         
         # split into multiple heads
@@ -50,12 +90,12 @@ class MHSA(torch.nn.Module):
         V = V.reshape(B, T, self.n_heads, self.dim_head).transpose(1, 2).contiguous()  # [B, H, T, d]
         
         # apply layer norm to Q and K for better stability
-        mask_bc = mask.unsqueeze(1)  # [B, 1, T, 1]
-        Q = self.norm_q(Q) * mask_bc  # [B, H, T, d]
-        K = self.norm_k(K) * mask_bc  # [B, H, T, d]
+        Q = self.norm_q(Q)  # [B, H, T, d]
+        K = self.norm_k(K)  # [B, H, T, d]
         
-        # create attention mask
-        attn_mask = mask_bc * mask_bc.transpose(3, 2).contiguous()  # [B, 1, T, 1] * [B, 1, 1, T] = [B, 1, T, T]
+        # apply rope
+        Q = self.rope(Q, pos)  # [B, H, T, d]
+        K = self.rope(K, pos)  # [B, H, T, d]
         
         # compute attention
         if USE_FLASH_ATTN:
@@ -77,8 +117,7 @@ class MHSA(torch.nn.Module):
         
         # project back to output dimension
         output = attn_output.transpose(2, 1).contiguous().reshape(B, T, D)  # [B, H, T, d] -> [B, T, H, d] -> [B, T, D]
-        mask = mask.squeeze(1)  # [B, 1, T, 1] -> [B, T, 1]
-        output = self.W_o(output) * mask  # [B, T, D]
+        output = self.W_o(output)  # [B, T, D]
         return output  # [B, T, D]
 
 
@@ -97,27 +136,28 @@ class TransformerLayer(torch.nn.Module):
     def forward(
         self,
         x: torch.FloatTensor['B T D'],
-        mod_params: torch.FloatTensor['B 1 6D'],
-        mask: torch.BoolTensor['B T 1']
+        mod_params: torch.FloatTensor['B 1|T 6D'],
+        attn_mask: torch.BoolTensor['B 1 T T'],
+        pos: torch.LongTensor['B T']
     ) -> torch.FloatTensor['B T D']:
         # unpacking current layer modulation params
-        std_1, mean_1, alpha_1, std_2, mean_2, alpha_2 = mod_params.chunk(6, -1)  # 6 x [B, 1, D]
+        std_1, mean_1, alpha_1, std_2, mean_2, alpha_2 = mod_params.chunk(6, -1)  # 6 x [B, 1|T, D]
         
         # applying self-attention
-        x_attn = self.norm_1(x) * mask  # [B, T, D]
-        x_attn = (x_attn * std_1 + mean_1) * mask  # [B, T, D]
-        x_attn = self.attn(x_attn, mask)  # [B, T, D]
+        x_attn = self.norm_1(x)  # [B, T, D]
+        x_attn = (x_attn * std_1 + mean_1)  # [B, T, D]
+        x_attn = self.attn(x_attn, attn_mask, pos)  # [B, T, D]
         x_attn = x_attn * alpha_1  # [B, T, D]
         x = x + x_attn  # [B, T, D]
         
         # applying ffn
-        x_ffn = self.norm_2(x) * mask  # [B, T, D]
-        x_ffn = (x_ffn * std_2 + mean_2) * mask # [B, T, D]
+        x_ffn = self.norm_2(x)  # [B, T, D]
+        x_ffn = (x_ffn * std_2 + mean_2) # [B, T, D]
         x_ffn = self.ffn(x_ffn)  # [B, T, D]
         x_ffn = x_ffn * alpha_2  # [B, T, D]
         x = x + x_ffn  # [B, T, D]
         
-        return x * mask
+        return x
 
 
 class DiT(torch.nn.Module):
@@ -144,20 +184,21 @@ class DiT(torch.nn.Module):
     def forward(
         self,
         x_t: torch.LongTensor['B T'],
-        t: torch.FloatTensor['B'],
-        mask: torch.BoolTensor['B T']
+        t: torch.FloatTensor['B 1|T'],
+        attn_mask: torch.BoolTensor['B 1 T T']
     ) -> torch.FloatTensor['B T vocab_size']:
-        mask = mask.unsqueeze(-1)  # [B, T, 1]
-        x = self.embedder(x_t) * mask  # [B, T, D]
-        t = t.unsqueeze(-1)  # [B, 1]
-        t = self.t_embedder(t)  # [B, D]
-        t = self.t_proj(t)  # [B, n_layers * 6 * D]
-        t = t.unsqueeze(1)  # [B, 1, n_layers * 6 * D]
-        mod_params = t.chunk(self.n_layers, -1)  # n_layers x [B, 1, 6 * D]
+        x = self.embedder(x_t)  # [B, T, D]
+        t = t.unsqueeze(-1)  # [B, 1|T, 1]
+        t = self.t_embedder(t)  # [B, 1|T, D]
+        t = self.t_proj(t)  # [B, 1|T, n_layers * 6 * D]
+        mod_params = t.chunk(self.n_layers, -1)  # n_layers x [B, 1|T, 6 * D]
         
+        pos = torch.arange(x.shape[1], device=x.device)  # [T]
+        pos = pos[None, :]  # [1, T]
+        pos = pos.repeat(x.shape[0], 1)  # [B, T]
         for i, layer in enumerate(self.layers):
-            x = layer(x, mod_params[i], mask)  # [B, T, D]
+            x = layer(x, mod_params[i], attn_mask, pos)  # [B, T, D]
         
         x = self.norm(x)  # [B, T, D]
-        logits = self.head(x) * mask  # [B, T, vocab_size]
+        logits = self.head(x)  # [B, T, vocab_size]
         return logits  # [B, T, vocab_size]
