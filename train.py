@@ -25,6 +25,7 @@ if __name__ == '__main__':
     bsz = args.bsz
     lr = args.lr
     n_epochs = args.n_epochs
+    torch_compile = args.torch_compile
     
     config = LLaDAConfig()
     
@@ -41,6 +42,8 @@ if __name__ == '__main__':
     # initialize model
     dit = DiT(config.dim, config.n_heads, config.dim_mult, config.n_layers, config.vocab_size)
     model = CategoricalFlowMatching(dit, config.vocab_size, config.eos_idx)
+    if torch_compile:
+        model = torch.compile(model, mode='reduce-overhead', fullgraph=True, dynamic=True)
     
     # initialize optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
